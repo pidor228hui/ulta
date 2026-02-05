@@ -2,3 +2,5 @@ vk_api
 aiosqlite
 python-dotenv
 aiohttp
+python-telegram-bot
+cryptography
