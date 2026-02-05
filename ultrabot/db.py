@@ -1,23 +1,70 @@
 import aiosqlite
 import os
+from datetime import datetime
+from typing import Optional
+
+from cryptography.fernet import Fernet
 
 DB_FOLDER = "dbs"
 os.makedirs(DB_FOLDER, exist_ok=True)
+AUTH_DB_PATH = os.path.join(DB_FOLDER, "auth.db")
 
 def get_db_path(token):
     token_short = token[:8]  # первые 8 символов токена
     return os.path.join(DB_FOLDER, f"db_{token_short}.db")
 
 async def is_user_connected(token: str, user_id: int) -> bool:
-    db_path = f"data/{token}.db"
+    token_from_db = await get_vk_token(user_id)
+    return token_from_db is not None
 
-    async with aiosqlite.connect(db_path) as db:
+def _get_fernet() -> Fernet:
+    key = os.getenv("AUTH_ENCRYPTION_KEY")
+    if not key:
+        raise ValueError("AUTH_ENCRYPTION_KEY is not set")
+    return Fernet(key)
+
+async def _ensure_auth_table(db: aiosqlite.Connection) -> None:
+    await db.execute(
+        """
+        CREATE TABLE IF NOT EXISTS vk_auth (
+            vk_user_id INTEGER PRIMARY KEY,
+            telegram_user_id INTEGER NOT NULL,
+            token_encrypted BLOB NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """
+    )
+
+async def store_vk_token(vk_user_id: int, telegram_user_id: int, token: str) -> None:
+    fernet = _get_fernet()
+    encrypted_token = fernet.encrypt(token.encode("utf-8"))
+    async with aiosqlite.connect(AUTH_DB_PATH) as db:
+        await _ensure_auth_table(db)
+        await db.execute(
+            """
+            INSERT OR REPLACE INTO vk_auth (
+                vk_user_id,
+                telegram_user_id,
+                token_encrypted,
+                created_at
+            ) VALUES (?, ?, ?, ?)
+            """,
+            (vk_user_id, telegram_user_id, encrypted_token, datetime.utcnow().isoformat()),
+        )
+        await db.commit()
+
+async def get_vk_token(vk_user_id: int) -> Optional[str]:
+    fernet = _get_fernet()
+    async with aiosqlite.connect(AUTH_DB_PATH) as db:
+        await _ensure_auth_table(db)
         cursor = await db.execute(
-            "SELECT 1 FROM messages WHERE user_id = ? LIMIT 1",
-            (user_id,)
+            "SELECT token_encrypted FROM vk_auth WHERE vk_user_id = ?",
+            (vk_user_id,),
         )
         row = await cursor.fetchone()
-        return row is not None
+        if not row:
+            return None
+        return fernet.decrypt(row[0]).decode("utf-8")
 
 # ------------------------
 # Работа с префиксами
